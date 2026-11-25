@@ -2,6 +2,12 @@
 
 Open-source Linux **TUI & CLI** configuration, macro, RGB lighting, and firmware tool for the **Bloody W95 Max** (`model 0x0578`).
 
+<p align="center">
+  <a href="https://www.bloody.com/en/product.php?pid=10&id=323">
+    <img src="https://img.bloody.com/en/uploadfile/image/20230220/20230220093349_48399.png" alt="Bloody W95 Max" width="380" />
+  </a>
+</p>
+
 Built in safe Rust (`unsafe_code = "forbid"`) with **zero external-NOR writes** — custom macros and permanent RGB lighting are stored cleanly inside internal flash alongside reversible settings and full factory backup/restore support.
 
 ## Features
