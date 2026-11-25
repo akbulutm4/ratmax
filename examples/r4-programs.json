@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "model": 1400,
+  "programs": {
+    "core": 3,
+    "entries": [
+      "guna-double-hit",
+      "guna-triple-hit",
+      "guna-four-hit",
+      "guna-double-hit",
+      "precision-hold",
+      { "shoot-select": 2 }
+    ]
+  }
+}

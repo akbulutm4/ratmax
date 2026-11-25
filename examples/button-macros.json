@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "model": 1400,
+  "macros": {
+    "core": 4,
+    "bindings": [
+      {
+        "button": "back",
+        "name": "Copy",
+        "program": {
+          "press": [
+            {
+              "action": "tap",
+              "key": "ctrl+c",
+              "hold_ms": 20
+            }
+          ],
+          "release": [],
+          "repeat": 1
+        }
+      },
+      {
+        "button": "forward",
+        "name": "Paste",
+        "program": {
+          "press": [
+            {
+              "action": "tap",
+              "key": "ctrl+v",
+              "hold_ms": 20
+            }
+          ],
+          "release": [],
+          "repeat": 1
+        }
+      },
+      {
+        "button": "aux-click",
+        "name": "F13 on release",
+        "program": {
+          "press": [],
+          "release": [
+            {
+              "action": "tap",
+              "key": "f13",
+              "hold_ms": 20
+            }
+          ],
+          "repeat": 1
+        }
+      }
+    ]
+  }
+}

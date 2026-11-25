@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "baseline": "/path/to/your/w95max-boot-bank-baseline",
+  "backup": "/path/to/your/w95max-original-64kib-backup",
+  "assets": "/path/to/your/extracted/BloodyWorkShop8",
+  "sessions": "/path/to/your/ratmax-sessions"
+}

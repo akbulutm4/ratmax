@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "model": 1400,
+  "custom_shooting": {
+    "core": 3,
+    "bullets": [
+      {
+        "interval_ms": 120,
+        "move_x": 0,
+        "move_y": 2
+      },
+      {
+        "interval_ms": 160,
+        "move_x": 1,
+        "move_y": 3
+      },
+      {
+        "interval_ms": 100,
+        "move_x": 0,
+        "move_y": 0
+      }
+    ]
+  }
+}
