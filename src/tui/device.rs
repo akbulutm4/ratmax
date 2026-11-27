@@ -51,8 +51,24 @@ struct Active {
     clear_pending_on_success: bool,
 }
 
+struct InitPrompt {
+    detected: crate::init::DetectedMouse,
+    assets: Result<PathBuf, String>,
+    data_dir: PathBuf,
+    reason: String,
+}
+
+struct InitActive {
+    child: Child,
+    progress_file: PathBuf,
+    stdout_file: PathBuf,
+    stderr_file: PathBuf,
+}
+
 enum State {
     Ready,
+    InitPrompt(Box<InitPrompt>),
+    Initializing(InitActive),
     Review(Review),
     Running(Active),
 }
@@ -62,6 +78,8 @@ const TOTAL_ROWS: usize = 15; // 0..=4 DPI, 5 Rate, 6 Core, 7 Shooting, 8..=14 B
 pub(super) struct Panel {
     options: WorkflowOptions,
     workspace: Result<Workspace, String>,
+    detected_uninitialized: Option<crate::init::DetectedMouse>,
+    init_assets: Option<Result<PathBuf, String>>,
     core: Core,
     entry: Option<Mode>,
     settings: Settings,
@@ -83,6 +101,8 @@ impl Panel {
         let mut p = Self {
             options,
             workspace,
+            detected_uninitialized: None,
+            init_assets: None,
             core,
             entry: None,
             settings,
@@ -96,6 +116,9 @@ impl Panel {
             current: None,
         };
         p.refresh();
+        if p.workspace.is_err() && !p.options.model {
+            p.probe_uninitialized(true);
+        }
         if p.last.is_none()
             && let Ok(w) = &p.workspace
         {
@@ -194,6 +217,9 @@ impl Panel {
     }
 
     pub(super) fn header_status(&self) -> (&'static str, String, Color) {
+        if matches!(self.state, State::Initializing(_)) {
+            return ("●", "Initializing…".into(), Color::Yellow);
+        }
         if self.running() {
             return ("●", "Working…".into(), Color::Yellow);
         }
@@ -202,6 +228,16 @@ impl Panel {
                 .installed_core()
                 .map_or("Core ?".into(), |c| format!("Core {}", c.number()));
             return ("●", format!("Model · W95 Max ({core_str})"), Color::Yellow);
+        }
+        if self.workspace.is_err() {
+            if let Some(det) = &self.detected_uninitialized {
+                return (
+                    "●",
+                    format!("W95 Max · {} (Needs Init)", det.mode_label()),
+                    Color::Yellow,
+                );
+            }
+            return ("○", "Needs initialization".into(), Color::Yellow);
         }
         match self.entry {
             Some(Mode::Normal) => ("●", "W95 Max · Original Core 1".into(), Color::Green),
@@ -219,20 +255,129 @@ impl Panel {
     }
 
     pub(super) fn running(&self) -> bool {
-        matches!(self.state, State::Running(_))
+        matches!(self.state, State::Running(_) | State::Initializing(_))
     }
 
     pub(super) fn startup_read(&mut self) {
+        if self.workspace.is_err() || matches!(self.state, State::InitPrompt(_)) {
+            return;
+        }
         if let Err(error) = self.read_current() {
             self.message = Some((error, true));
         }
     }
 
     pub(super) fn trigger_refresh(&mut self) {
+        if self.workspace.is_err() {
+            self.workspace = Workspace::load(&self.options.workspace);
+            if self.workspace.is_err() {
+                if !self.options.model {
+                    self.probe_uninitialized(true);
+                }
+                return;
+            }
+            self.detected_uninitialized = None;
+            self.init_assets = None;
+        }
         self.refresh();
         if let Err(e) = self.read_current() {
             self.message = Some((e, true));
         }
+    }
+
+    fn probe_uninitialized(&mut self, open_prompt: bool) {
+        let assets = crate::init::resolve_assets(None, Some(&self.options.workspace));
+        self.init_assets = Some(assets.clone());
+        match crate::init::detect_mouse() {
+            Ok(Some(detected)) => {
+                self.detected_uninitialized = Some(detected.clone());
+                if open_prompt {
+                    let reason = self
+                        .workspace
+                        .as_ref()
+                        .err()
+                        .cloned()
+                        .unwrap_or_else(|| "No baseline/backup workspace configured.".into());
+                    self.state = State::InitPrompt(Box::new(InitPrompt {
+                        detected,
+                        assets,
+                        data_dir: Workspace::preferred_data_dir(),
+                        reason,
+                    }));
+                }
+            }
+            Ok(None) => {
+                self.detected_uninitialized = None;
+                self.message = Some((
+                    "No Bloody W95 Max mouse detected on USB. Plug it in and press r to re-scan."
+                        .into(),
+                    true,
+                ));
+            }
+            Err(e) => {
+                self.detected_uninitialized = None;
+                self.message = Some((format!("Mouse detection failed: {e}"), true));
+            }
+        }
+    }
+
+    fn start_init(&mut self) -> Result<(), String> {
+        let State::InitPrompt(prompt) = std::mem::replace(&mut self.state, State::Ready) else {
+            return Ok(());
+        };
+        let prompt = *prompt;
+        let assets = match prompt.assets {
+            Ok(path) => path,
+            Err(err) => {
+                self.state = State::InitPrompt(Box::new(InitPrompt {
+                    assets: Err(err.clone()),
+                    ..prompt
+                }));
+                return Err(err);
+            }
+        };
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos();
+        let pid = std::process::id();
+        let tmp_dir = std::env::temp_dir();
+        let progress_file = tmp_dir.join(format!("ratmax-init-progress-{pid}-{stamp}.txt"));
+        let stdout_file = tmp_dir.join(format!("ratmax-init-stdout-{pid}-{stamp}.json"));
+        let stderr_file = tmp_dir.join(format!("ratmax-init-stderr-{pid}-{stamp}.txt"));
+        let stdout = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stdout_file)
+            .map_err(|e| e.to_string())?;
+        let stderr = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stderr_file)
+            .map_err(|e| e.to_string())?;
+        let mut cmd = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+        cmd.arg("init")
+            .arg("--assets")
+            .arg(&assets)
+            .arg("--dir")
+            .arg(&prompt.data_dir)
+            .arg("--workspace")
+            .arg(&self.options.workspace)
+            .arg("--progress-file")
+            .arg(&progress_file)
+            .arg("--json")
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr);
+        let child = cmd.spawn().map_err(|e| e.to_string())?;
+        self.message = None;
+        self.state = State::Initializing(InitActive {
+            child,
+            progress_file,
+            stdout_file,
+            stderr_file,
+        });
+        Ok(())
     }
 
     fn sync_core_to_installed(&mut self) {
@@ -721,6 +866,55 @@ impl Panel {
     }
 
     pub(super) fn poll(&mut self) {
+        if let State::Initializing(job) = &mut self.state {
+            match job.child.try_wait() {
+                Ok(Some(status)) => {
+                    let stderr_text = std::fs::read_to_string(&job.stderr_file).unwrap_or_default();
+                    let _ = std::fs::remove_file(&job.progress_file);
+                    let _ = std::fs::remove_file(&job.stdout_file);
+                    let _ = std::fs::remove_file(&job.stderr_file);
+                    self.state = State::Ready;
+                    if status.success() {
+                        self.workspace = Workspace::load(&self.options.workspace);
+                        if self.workspace.is_ok() {
+                            self.detected_uninitialized = None;
+                            self.init_assets = None;
+                            self.refresh();
+                            self.sync_core_to_installed();
+                            if let Err(e) = self.read_current() {
+                                self.message = Some((
+                                    format!("Workspace initialized, but live read failed: {e}"),
+                                    true,
+                                ));
+                            } else {
+                                self.message = Some((
+                                    "Workspace initialized and verified from mouse.".into(),
+                                    false,
+                                ));
+                            }
+                        } else if let Err(e) = &self.workspace {
+                            self.message = Some((format!("Initialized, but reload failed: {e}"), true));
+                        }
+                    } else {
+                        let detail = stderr_text
+                            .trim()
+                            .strip_prefix("ratmax: ")
+                            .unwrap_or(stderr_text.trim());
+                        let msg = if detail.is_empty() {
+                            "Initialization failed.".into()
+                        } else {
+                            format!("Init failed: {detail}")
+                        };
+                        self.message = Some((msg, true));
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    self.message = Some((e.to_string(), true));
+                }
+            }
+            return;
+        }
         if let State::Running(job) = &self.state
             && job.cancel_requested
             && job.stop_root.exists()
@@ -967,8 +1161,25 @@ impl Panel {
         }
     }
 
-    /// Handles keys while a review/running/CPI-input modal is active. Returns `true` to stay open.
+    /// Handles keys while a review/running/init/CPI-input modal is active. Returns `true` to stay open.
     pub(super) fn handle_modal(&mut self, key: KeyEvent) -> bool {
+        if matches!(self.state, State::Initializing(_)) {
+            return true;
+        }
+        if matches!(self.state, State::InitPrompt(_)) {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    if let Err(e) = self.start_init() {
+                        self.message = Some((e, true));
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.state = State::Ready;
+                }
+                _ => {}
+            }
+            return true;
+        }
         if self.running() {
             if matches!(key.code, KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('x'))
                 || (key.code == KeyCode::Char('c')
@@ -1029,6 +1240,19 @@ impl Panel {
     }
 
     pub(super) fn handle(&mut self, key: KeyEvent) -> bool {
+        if self.workspace.is_err() {
+            return match key.code {
+                KeyCode::Char('i') | KeyCode::Char('I') => {
+                    self.probe_uninitialized(true);
+                    true
+                }
+                KeyCode::Char('r') => {
+                    self.trigger_refresh();
+                    true
+                }
+                _ => false,
+            };
+        }
         let result: Result<(), String> = match key.code {
             KeyCode::Up => {
                 self.row = (self.row + TOTAL_ROWS - 1) % TOTAL_ROWS;
@@ -1123,8 +1347,73 @@ impl Panel {
 
     pub(super) fn draw(&self, frame: &mut Frame<'_>, area: Rect) {
         if let Err(e) = &self.workspace {
-            let p = Paragraph::new(format!("\n  Workspace error: {e}"))
-                .block(Block::default().borders(Borders::ALL).title(" Mouse "));
+            let mut lines = vec![
+                Line::raw(""),
+                Line::styled(
+                    "  Workspace is not initialized yet (no verified baseline/backup).",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Line::styled(format!("  Details: {e}"), Style::default().fg(Color::Gray)),
+                Line::raw(""),
+            ];
+            if let Some(det) = &self.detected_uninitialized {
+                lines.push(Line::from(vec![
+                    Span::styled("  Detected mouse: ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        format!(
+                            "Bloody W95 Max · {} on {}",
+                            det.mode_label(),
+                            det.binding.device_path()
+                        ),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                match &self.init_assets {
+                    Some(Ok(path)) => lines.push(Line::from(vec![
+                        Span::styled("  Stock assets:   ", Style::default().fg(Color::Gray)),
+                        Span::styled(path.display().to_string(), Style::default().fg(Color::White)),
+                    ])),
+                    Some(Err(err)) => lines.push(Line::styled(
+                        format!("  Stock assets:   {err}"),
+                        Style::default().fg(Color::Red),
+                    )),
+                    None => {}
+                }
+                lines.push(Line::raw(""));
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        " [i] Initialize workspace from detected mouse ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "   [r] Re-scan   [q] Quit",
+                        Style::default().fg(Color::Gray),
+                    ),
+                ]));
+            } else {
+                lines.push(Line::styled(
+                    "  No Bloody W95 Max mouse detected on USB. Connect your mouse and press [r] to re-scan.",
+                    Style::default().fg(Color::Red),
+                ));
+            }
+            if let Some((msg, is_err)) = &self.message {
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(
+                    format!("  {msg}"),
+                    Style::default().fg(if *is_err { Color::Red } else { Color::Green }),
+                ));
+            }
+            let p = Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(Block::default().borders(Borders::ALL).title(" Mouse — Setup Required "));
             frame.render_widget(p, area);
             return;
         }
@@ -1358,6 +1647,122 @@ impl Panel {
             return;
         }
         match &self.state {
+            State::InitPrompt(prompt) => {
+                let mut lines: Vec<Line<'_>> = vec![
+                    Line::raw(""),
+                    Line::styled(
+                        "  No verified baseline/backup workspace was found.",
+                        Style::default().fg(Color::White),
+                    ),
+                    Line::styled(
+                        format!("  ({})", prompt.reason),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Line::raw(""),
+                    Line::from(vec![
+                        Span::styled("  Detected:   ", Style::default().fg(Color::Gray)),
+                        Span::styled(
+                            format!("Bloody W95 Max · {}", prompt.detected.mode_label()),
+                            Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("  Interface:  ", Style::default().fg(Color::Gray)),
+                        Span::styled(
+                            format!("{} (09DA:712F)", prompt.detected.binding.device_path()),
+                            Style::default().fg(Color::White),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("  Save to:    ", Style::default().fg(Color::Gray)),
+                        Span::styled(
+                            prompt.data_dir.display().to_string(),
+                            Style::default().fg(Color::White),
+                        ),
+                    ]),
+                ];
+                match &prompt.assets {
+                    Ok(assets) => {
+                        lines.push(Line::from(vec![
+                            Span::styled("  Assets:     ", Style::default().fg(Color::Gray)),
+                            Span::styled(
+                                assets.display().to_string(),
+                                Style::default().fg(Color::White),
+                            ),
+                        ]));
+                        lines.push(Line::raw(""));
+                        lines.push(Line::styled(
+                            "  Reads your mouse's flash & boot bank twice (read-only, zero writes,",
+                            Style::default().fg(Color::Gray),
+                        ));
+                        lines.push(Line::styled(
+                            "  ~10 seconds) to create your verified backup and baseline.",
+                            Style::default().fg(Color::Gray),
+                        ));
+                        lines.push(Line::raw(""));
+                        lines.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(
+                                " [y / Enter] Initialize from Mouse ",
+                                Style::default()
+                                    .fg(Color::Black)
+                                    .bg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw("    "),
+                            Span::styled("[Esc] Cancel", Style::default().fg(Color::Gray)),
+                        ]));
+                    }
+                    Err(err) => {
+                        lines.push(Line::from(vec![
+                            Span::styled("  Assets:     ", Style::default().fg(Color::Gray)),
+                            Span::styled(err.clone(), Style::default().fg(Color::Red)),
+                        ]));
+                        lines.push(Line::raw(""));
+                        lines.push(Line::styled(
+                            "  Extract stock W95 Max assets with `7z` (see `ratmax --help`), then press [r].",
+                            Style::default().fg(Color::Yellow),
+                        ));
+                        lines.push(Line::raw(""));
+                        lines.push(Line::styled("  [Esc] Close", Style::default().fg(Color::Gray)));
+                    }
+                }
+                super::draw_popup_box(
+                    frame,
+                    area,
+                    "INITIALIZE WORKSPACE FROM MOUSE",
+                    Color::Yellow,
+                    lines,
+                );
+            }
+            State::Initializing(job) => {
+                let step = std::fs::read_to_string(&job.progress_file)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "Connecting to mouse…".into());
+                let lines = vec![
+                    Line::raw(""),
+                    Line::styled(
+                        format!("  {step}"),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Line::raw(""),
+                    Line::styled(
+                        "  Read-only 2-pass backup & baseline verification (zero writes).",
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Line::styled(
+                        "  Please wait and do not unplug the mouse…",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ];
+                super::draw_popup_box(frame, area, "INITIALIZING MOUSE", Color::Cyan, lines);
+            }
             State::Review(review) => {
                 let mut lines: Vec<Line<'_>> = vec![Line::raw("")];
                 for l in &review.lines {
@@ -1731,6 +2136,8 @@ mod tests {
                 assets: root.join("assets"),
                 sessions: root.join("jobs"),
             }),
+            detected_uninitialized: None,
+            init_assets: None,
             core: Core::One,
             entry: Some(Mode::Normal),
             settings: empty_settings(),
@@ -1863,6 +2270,52 @@ mod tests {
             job.child.wait().unwrap();
         }
         panel.state = State::Ready;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uninitialized_workspace_shows_init_prompt_and_dismisses_cleanly() {
+        let (root, mut panel) = fixture();
+        panel.options.model = false;
+        panel.workspace = Err("workspace baseline path missing".into());
+        let detected = crate::init::DetectedMouse {
+            mode: Mode::Target(Core::Three),
+            binding: crate::query_session::Binding {
+                node: "hidraw3".into(),
+                hid_sysfs_path: "/sys/devices/pci0000:00/usb1/1-5/1-5:1.2/0003:09DA:712F.0004"
+                    .into(),
+                usb_parent: "/sys/devices/pci0000:00/usb1/1-5".into(),
+                usb_interface_path: "/sys/devices/pci0000:00/usb1/1-5/1-5:1.2".into(),
+                usb_bus_number: 1,
+                usb_device_number: 3,
+                usb_interface_number: 2,
+                usb_release_bcd: 0x34,
+                vendor_id: 0x09da,
+                product_id: 0x712f,
+                manufacturer: "A4TECH".into(),
+                product: "Bloody W95 Max".into(),
+                serial: None,
+                hid_phys: Some("usb-1-5/input2".into()),
+                hid_unique: Some(String::new()),
+                major_minor: "243:3".into(),
+                feature_07_total_bytes: 64,
+                descriptor_bytes: 180,
+                descriptor_sha256:
+                    "a4fc70e1648716690a8989efb837f907447bc0ced5e68e906a53615fb7890d24".into(),
+            },
+        };
+        panel.detected_uninitialized = Some(detected.clone());
+        panel.state = State::InitPrompt(Box::new(InitPrompt {
+            detected,
+            assets: Ok(root.join("BloodyWorkShop8")),
+            data_dir: root.join("data"),
+            reason: "workspace baseline path missing".into(),
+        }));
+        assert!(panel.modal_active());
+        let (_, status, _) = panel.header_status();
+        assert!(status.contains("Needs Init"), "got: {status}");
+        assert!(panel.handle_modal(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!panel.modal_active());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

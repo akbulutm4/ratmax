@@ -59,7 +59,7 @@ fn custom_guna_and_isolated_program_examples_preview_without_hardware() {
     assert!(!report.write_ready);
     assert_eq!(report.custom_shooting.unwrap().words.press.len(), 21);
 
-    let report = project("r4-programs.json");
+    let report = project("shooting-programs.json");
     assert!(!report.write_ready);
     let profile = report.programs.unwrap();
     let references: Vec<_> = profile

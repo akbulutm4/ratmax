@@ -63,8 +63,7 @@ fn word(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
 }
 
-/// Exact 63-entry calibrated `SENSOR_3327` (P3332A) step table from
-/// `BloodyWorkShop8.exe` (`[ebx + 0xB0..=0x12C]`, 0..=6200 CPI in 100-CPI steps).
+/// Calibrated 63-entry `SENSOR_3327` (`P3332A`) sensor step table (0..=6200 CPI in 100-CPI steps).
 const SENSOR_3327_TABLE: [u16; 63] = [
     0x00, 0x00, 0x04, 0x06, 0x09, 0x0b, 0x0e, 0x10, 0x12, 0x15, 0x17, 0x19, 0x1b, 0x1d, 0x20, 0x22,
     0x24, 0x27, 0x29, 0x2b, 0x2e, 0x30, 0x32, 0x34, 0x37, 0x39, 0x3b, 0x3e, 0x40, 0x42, 0x45, 0x48,
@@ -77,14 +76,14 @@ pub const MAX_SENSOR_STEP: u16 = 0x0091; // 145 (6200 CPI)
 const MAX_SCALE_WORD: u16 = 124; // round(12000 / (6200 / 64)) = 0x007C
 
 fn scale_above_6200(cpi: u16) -> u16 {
-    // Matches BloodyWorkShop8.exe helper 0x45CCE4(cpi, 6200):
+    // Q10.6 fixed-point scale relative to 6200 CPI native ceiling:
     // floor(cpi / (6200.0 / 64.0) + 0.5)
     let raw = (f64::from(cpi) / (f64::from(NATIVE_MAX_CPI) / 64.0) + 0.5).floor();
     raw.clamp(1.0, f64::from(MAX_SCALE_WORD)) as u16
 }
 
 fn ratio_scale(minor: u16, major: u16) -> u16 {
-    // Matches BloodyWorkShop8.exe 0x45D27E..0x45D2A3 / 0x45D2D5..0x45D2FA:
+    // Q10.6 fixed-point minor/major axis ratio:
     // floor(((minor << 6) * 1.0) / major + 0.5)
     let raw = (f64::from(u32::from(minor) << 6) / f64::from(major) + 0.5).floor();
     raw.clamp(1.0, 64.0) as u16
@@ -254,7 +253,9 @@ pub fn preview(
             return Err(format!("CPI slot {slot} includes an ambiguous byte"));
         }
         for (dest, encoded) in candidate[offset..offset + 6]
-            .chunks_exact_mut(2)
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
             .zip(encode_cpi(edit.cpi)?)
         {
             dest.copy_from_slice(&encoded.to_le_bytes());
@@ -334,7 +335,7 @@ mod tests {
         assert_eq!(encode_cpi(1200).unwrap(), [0x0040, 0x0040, 0x001a]);
         assert_eq!(encode_cpi(1600).unwrap(), [0x0040, 0x0040, 0x0023]);
         assert_eq!(encode_cpi(6200).unwrap(), [0x0040, 0x0040, 0x008c]);
-        // High equal-axis > 6200 uses 0x45CCE4 + sensor step 0x0091.
+        // High equal-axis > 6200 uses Q10.6 scaling at sensor step 0x0091.
         assert_eq!(encode_cpi(8000).unwrap(), [83, 83, 0x0091]);
         assert_eq!(encode_cpi(12000).unwrap(), [124, 124, 0x0091]);
         assert!(encode_cpi(12001).is_err());

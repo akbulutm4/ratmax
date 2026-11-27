@@ -291,16 +291,14 @@ fn read_regular_image(path: &Path) -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
-/// Resolve only the two documented workspace locations. Installed binaries can
-/// use --assets explicitly; no build-machine absolute path is baked in.
+/// Resolve the documented per-user XDG data asset location
+/// (`$XDG_DATA_HOME/ratmax/vendor/program files/BloodyWorkShop8`, defaulting to
+/// `~/.local/share/ratmax/vendor/program files/BloodyWorkShop8`).
+/// Callers can also pass `--assets PATH` explicitly or configure `"assets"` in `workspace.json`.
 pub fn default_asset_root() -> Option<PathBuf> {
-    [
-        PathBuf::from("setup-analysis"),
-        PathBuf::from("../setup-analysis"),
-    ]
-    .into_iter()
-    .map(|path| path.join("extracted/program files/BloodyWorkShop8"))
-    .find(|path| path.is_dir())
+    let candidate = crate::workflow::Workspace::preferred_data_dir()
+        .join("vendor/program files/BloodyWorkShop8");
+    candidate.is_dir().then_some(candidate)
 }
 
 #[cfg(test)]

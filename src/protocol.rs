@@ -1,5 +1,4 @@
-//! Pure local-buffer codecs from analysis checkpoint 15. These are not measured
-//! HID report sizes, a read-only hardware API, or permission to issue commands.
+//! Pure 64-byte Feature Report codecs for bootloader and normal-mode commands.
 
 use std::fmt;
 

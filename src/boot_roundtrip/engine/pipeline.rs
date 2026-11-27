@@ -200,7 +200,7 @@ impl<'a, T: Link> Session<'a, T> {
                     self.close_gate()?;
                     self.set("preset-full-open", &key_frame(0x22184952))?;
                     let mut full = Vec::with_capacity(65536);
-                    for (i, want) in expected.chunks_exact(32).enumerate() {
+                    for (i, want) in expected.as_chunks::<32>().0.iter().enumerate() {
                         let mut frame = read_frame(2, (i * 32) as u32, 8);
                         for (a, b) in frame[32..].iter_mut().zip(want) {
                             *a = !*b;
@@ -490,8 +490,7 @@ impl<'a, T: Link> Session<'a, T> {
             for at in [0xff40, 0xff60] {
                 expected[at..at + 32].copy_from_slice(&actual[&at]);
             }
-            let orig_bank = &plan.backup.original[boot_bank::COPY_BASE as usize
-                ..boot_bank::COPY_BASE as usize + boot_bank::BANK_BYTES];
+            let orig_bank = plan.backup.embedded_boot_bank();
             self.pipeline_bank("preset-original-bank", Some(orig_bank))?;
             self.state.pipeline.as_mut().unwrap().retry_allowed = true;
             self.pipeline_flash(&mut expected)?;
@@ -539,8 +538,7 @@ impl<'a, T: Link> Session<'a, T> {
             }
             if self.pipeline_recovery.is_some() {
                 let bank = if self.state.mode == Some(Mode::Normal) {
-                    &plan.backup.original[boot_bank::COPY_BASE as usize
-                        ..boot_bank::COPY_BASE as usize + boot_bank::BANK_BYTES]
+                    plan.backup.embedded_boot_bank()
                 } else {
                     plan.stock.boot_copy()
                 };
@@ -603,14 +601,18 @@ impl<'a, T: Link> Session<'a, T> {
         self.pipeline_sample("preset-restore-programmed", &expected, 0)?;
         self.state.marker_dirty = false;
         self.state.neighbors_verified = true;
-        self.reset(Mode::Normal)?;
-        self.normal_identity()?;
+        let restored_mode = plan.backup.mode();
+        self.reset(restored_mode)?;
+        if restored_mode == Mode::Normal {
+            self.normal_identity()?;
+        } else {
+            self.pipeline_target_information()?;
+        }
         self.pipeline_sample("preset-original-returned", &expected, 1)?;
-        let orig_bank = &plan.backup.original[boot_bank::COPY_BASE as usize
-            ..boot_bank::COPY_BASE as usize + boot_bank::BANK_BYTES];
+        let orig_bank = plan.backup.embedded_boot_bank();
         self.pipeline_bank("preset-returned-bank", Some(orig_bank))?;
         if plan.request.workflow.is_some() {
-            self.save_current_configuration(&expected, Mode::Normal, None, false, false)?;
+            self.save_current_configuration(&expected, restored_mode, None, false, false)?;
         }
         self.state
             .pipeline

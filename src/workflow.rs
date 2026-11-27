@@ -374,9 +374,59 @@ pub(crate) fn validate_budget(
     Ok(())
 }
 impl Workspace {
+    /// Resolve the user's home directory from `$HOME`.
+    /// When running with `sudo`, use `sudo -E` so `$HOME` and XDG paths are preserved.
+    pub fn user_home() -> Option<PathBuf> {
+        std::env::var_os("HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    }
+
+    /// Preferred path where `ratmax init` and the TUI read/create `workspace.json`.
+    pub fn preferred_config_path() -> PathBuf {
+        if let Some(value) = std::env::var_os("RATMAX_WORKSPACE")
+            && !value.is_empty()
+        {
+            return PathBuf::from(value);
+        }
+        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+            && !xdg.is_empty()
+        {
+            return PathBuf::from(xdg).join("ratmax").join("workspace.json");
+        }
+        Self::user_home()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".config")
+            .join("ratmax")
+            .join("workspace.json")
+    }
+
+    /// Preferred local data directory for initialized baseline, backup, and sessions.
+    pub fn preferred_data_dir() -> PathBuf {
+        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME")
+            && !xdg.is_empty()
+        {
+            return PathBuf::from(xdg).join("ratmax");
+        }
+        Self::user_home()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".local")
+            .join("share")
+            .join("ratmax")
+    }
+
+    /// Read a valid `"assets"` path from an existing (possibly incomplete) `workspace.json`.
+    pub fn read_assets_hint(path: &Path) -> Option<PathBuf> {
+        let raw = crate::preview::read_file(path, 65536).ok()?;
+        let val: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+        let assets = val.get("assets")?.as_str()?;
+        let root = path.parent().unwrap_or(Path::new("."));
+        let candidate = root.join(assets);
+        candidate.is_dir().then(|| std::fs::canonicalize(&candidate).unwrap_or(candidate))
+    }
+
     /// Resolve workspace from `RATMAX_WORKSPACE` (empty disables lookup),
-    /// `$XDG_CONFIG_HOME/ratmax/workspace.json`, `$HOME/.config/ratmax/workspace.json`,
-    /// or `$SUDO_USER`'s `~/.config/ratmax/workspace.json`.
+    /// `$XDG_CONFIG_HOME/ratmax/workspace.json`, or `$HOME/.config/ratmax/workspace.json`.
     pub fn default_path() -> Option<PathBuf> {
         if let Some(value) = std::env::var_os("RATMAX_WORKSPACE") {
             return (!value.is_empty()).then(|| PathBuf::from(value));
@@ -389,24 +439,11 @@ impl Workspace {
                 return Some(candidate);
             }
         }
-        if let Some(home) = std::env::var_os("HOME")
-            && !home.is_empty()
-        {
-            let candidate = PathBuf::from(home)
+        if let Some(home) = Self::user_home() {
+            let candidate = home
                 .join(".config")
                 .join("ratmax")
                 .join("workspace.json");
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-        if let Ok(user) = std::env::var("SUDO_USER")
-            && !user.is_empty()
-            && user != "root"
-            && let Ok(passwd) = std::fs::read_to_string("/etc/passwd")
-            && let Some(home) = passwd_home(&passwd, &user)
-        {
-            let candidate = home.join(".config").join("ratmax").join("workspace.json");
             if candidate.is_file() {
                 return Some(candidate);
             }
@@ -416,20 +453,28 @@ impl Workspace {
 
     pub fn resolve_default() -> Result<PathBuf, String> {
         Self::default_path().ok_or_else(|| {
-            "workspace not found; set RATMAX_WORKSPACE or create ~/.config/ratmax/workspace.json"
+            "workspace not found; run `ratmax init` or launch `ratmax tui` to initialize from your mouse"
                 .into()
         })
     }
 
     pub fn load(path: &Path) -> Result<Self, String> {
-        let mut value: Self = serde_json::from_slice(&crate::preview::read_file(path, 65536)?)
-            .map_err(|e| e.to_string())?;
+        let raw = crate::preview::read_file(path, 65536)
+            .map_err(|e| format!("workspace file {}: {e}", path.display()))?;
+        let mut value: Self = serde_json::from_slice(&raw)
+            .map_err(|e| format!("invalid workspace JSON {}: {e}", path.display()))?;
         if value.schema != 1 {
             return Err("unsupported workspace schema".into());
         }
         let root = path.parent().unwrap_or(Path::new("."));
-        for p in [&mut value.baseline, &mut value.backup, &mut value.assets] {
-            *p = std::fs::canonicalize(root.join(&*p)).map_err(|e| e.to_string())?;
+        for (label, p) in [
+            ("baseline", &mut value.baseline),
+            ("backup", &mut value.backup),
+            ("assets", &mut value.assets),
+        ] {
+            let joined = root.join(&*p);
+            *p = std::fs::canonicalize(&joined)
+                .map_err(|e| format!("workspace {label} path {}: {e}", joined.display()))?;
         }
         value.sessions = root.join(value.sessions);
         if !value.sessions.is_absolute() {
@@ -437,8 +482,10 @@ impl Workspace {
                 .map_err(|e| e.to_string())?
                 .join(value.sessions);
         }
-        crate::backup_restore::Plan::load(&value.backup)?;
-        boot_roundtrip::load(&value.baseline)?;
+        crate::backup_restore::Plan::load(&value.backup)
+            .map_err(|e| format!("workspace backup ({}): {e}", value.backup.display()))?;
+        boot_roundtrip::load(&value.baseline)
+            .map_err(|e| format!("workspace baseline ({}): {e}", value.baseline.display()))?;
         Ok(value)
     }
     pub fn create_budget(&self, model: bool) -> Result<PathBuf, String> {
@@ -447,7 +494,7 @@ impl Workspace {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| e.to_string())?
             .as_nanos();
-        let root = crate::access_session::create_output(&self.sessions.join(format!(
+        let root = crate::boot_roundtrip::create_output(&self.sessions.join(format!(
             "{}-{stamp}",
             if model { "model" } else { "device" }
         )))?;
@@ -491,7 +538,7 @@ impl Workspace {
     }
     pub fn export_backup(&self, output: &Path) -> Result<serde_json::Value, String> {
         let backup_plan = crate::backup_restore::Plan::load(&self.backup)?;
-        let output = crate::access_session::create_output(output)?;
+        let output = crate::boot_roundtrip::create_output(output)?;
         for name in [
             "session.json",
             "normal-image.pass0.bin",
@@ -907,28 +954,4 @@ pub(crate) fn current_configuration(
         sensitivity_uses_stock_default,
         profile_uses_stock_default,
     })
-}
-
-fn passwd_home(contents: &str, user: &str) -> Option<PathBuf> {
-    contents.lines().find_map(|line| {
-        let mut fields = line.split(':');
-        let name = fields.next()?;
-        if name != user {
-            return None;
-        }
-        let home = fields.nth(4)?;
-        (!home.is_empty()).then(|| PathBuf::from(home))
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn passwd_home_extracts_matching_user_directory() {
-        let sample = "root:x:0:0:root:/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/zsh\n";
-        assert_eq!(passwd_home(sample, "alice"), Some(PathBuf::from("/home/alice")));
-        assert_eq!(passwd_home(sample, "missing"), None);
-    }
 }

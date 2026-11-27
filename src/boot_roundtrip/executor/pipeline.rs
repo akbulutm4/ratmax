@@ -409,8 +409,6 @@ fn actor(
         number: 0,
         start: Instant::now(),
         total_budget: Duration::from_secs(crate::boot_roundtrip::pipeline::TOTAL_SECONDS),
-        #[cfg(test)]
-        offline_protocol_test: false,
     };
     let (mut state, mut remote) =
         Session::new_pipeline(plan, remote, Some(directory), recovery, full_read).execute();
@@ -507,7 +505,7 @@ pub(in crate::boot_roundtrip) fn run(
     output: &Path,
     recover: bool,
 ) -> Result<serde_json::Value, String> {
-    let output = crate::access_session::create_output(output)?;
+    let output = crate::boot_roundtrip::create_output(output)?;
     let (plan, source_sha, source, root) = if recover {
         let prior = std::fs::canonicalize(project).map_err(|e| e.to_string())?;
         let metadata = if prior.join("cycle.json").exists() {
@@ -652,14 +650,8 @@ pub(in crate::boot_roundtrip) fn worker(request: &Path) -> Result<(), String> {
             serde_json::from_slice(&crate::preview::read_file(request, 65536)?)
                 .map_err(|e| e.to_string())?;
         let (plan, fp) = load_source(&request.source, true)?;
-        if plan.request.workflow.is_some() {
-            if !crate::workflow::available() {
-                return Err("workflow worker is disabled in this build".into());
-            }
-        } else if !crate::boot_roundtrip::pipeline::available()
-            && !(request.recovery.is_some() && crate::workflow::available())
-        {
-            return Err("preset worker is disabled in this build".into());
+        if !crate::workflow::available() {
+            return Err("workflow worker is disabled in this build".into());
         }
 
         let expected_root = plan
@@ -711,7 +703,7 @@ pub(in crate::boot_roundtrip) fn model_workflow(
     output: &Path,
     recover: bool,
 ) -> Result<serde_json::Value, String> {
-    let output = crate::access_session::create_output(output)?;
+    let output = crate::boot_roundtrip::create_output(output)?;
     let (plan, source, fp, root) = if recover {
         let report: serde_json::Value = serde_json::from_slice(&crate::preview::read_file(
             &project.join("cycle.json"),

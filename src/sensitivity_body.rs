@@ -1,4 +1,4 @@
-//! R3i-derived first-body-window codec. No transport, writer or full dump API.
+//! Echo verification helpers for normal-mode `07 2F` header reads.
 use crate::{
     protocol::ProtocolError,
     readback::{ByteSpan, ReadbackError, RuntimeDescriptorReply},

@@ -50,7 +50,9 @@ EOF
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-### 3. Extract Stock Firmware Assets (using `7z`) & Configure Workspace
+*(If you prefer using `sudo` instead of `udev` rules, run `sudo -E ratmax tui` so `$HOME` and XDG config paths are preserved.)*
+
+### 3. Extract Stock Firmware Assets (`7z`) & Initialize Workspace
 
 Ratmax does **not** redistribute proprietary Bloody firmware binaries or device backups. Download the free official **Bloody WorkShop 8** installer (`BloodyWorkShop8_*.exe`) from Bloody's website and extract only the four W95 Max firmware files (~240 KiB total — no Windows required) with `7z` (also printed by `ratmax --help`):
 
@@ -66,11 +68,13 @@ Verify the extracted files match the expected SHA-256 digests:
 ratmax inspect --assets "$HOME/.local/share/ratmax/vendor/program files/BloodyWorkShop8"
 ```
 
-Then point `"assets"` (along with your mouse's verified `baseline`, `backup`, and `sessions` directories) in `~/.config/ratmax/workspace.json` (see [examples/workspace.example.json](examples/workspace.example.json)), or set `RATMAX_WORKSPACE`, and launch:
+Then launch the TUI (or run `ratmax init`):
 
 ```sh
 ratmax tui
 ```
+
+On first launch without a workspace/baseline, the TUI automatically detects your connected Bloody W95 Max and prompts you to initialize your verified backup, baseline, and `~/.config/ratmax/workspace.json` directly from the mouse (read-only 2-pass capture, zero writes). You can also customize paths manually via `RATMAX_WORKSPACE` (see [examples/workspace.example.json](examples/workspace.example.json)).
 
 See [USAGE.md](USAGE.md) for full TUI keybindings, Core feature matrix, and CLI lighting shortcuts.
 

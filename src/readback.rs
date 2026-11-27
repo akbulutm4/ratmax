@@ -1,5 +1,4 @@
-//! Offline R3e readback codecs. No transport, device access or write API.
-//! Layouts and header observations do not establish a restorable backup.
+//! Runtime memory layout descriptor (`07 05`) and header read codecs.
 
 use crate::{firmware, protocol::ProtocolError};
 use serde::Serialize;

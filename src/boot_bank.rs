@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 pub const BANK_BASE: u32 = 0x1fff0000;
 pub const COPY_BASE: u32 = 0x3c60;
+pub const PREPARED_CORE14_COPY_BASE: u32 = 0x46d4;
+pub const PREPARED_CORE23_COPY_BASE: u32 = 0x46cc;
 pub const BANK_BYTES: usize = 0xc00;
 pub const BANK_BLOCKS: usize = BANK_BYTES / BLOCK_BYTES;
 
@@ -94,6 +96,25 @@ pub fn matches_prepared_bank(bytes: &[u8]) -> bool {
 
 pub fn matches_known_bank(bytes: &[u8]) -> bool {
     Revision::from_bank(bytes).is_some()
+}
+
+/// Locate the verified 3,072-byte embedded boot bank copy inside a 64 KiB W95 Max image.
+/// Works for original `0028` (`0x3C60`) and prepared `0034` (`0x46D4` for Core 1/4, `0x46CC` for Core 2/3).
+pub fn embedded_bank(image: &[u8]) -> Option<(usize, &[u8])> {
+    if image.len() != 65536 {
+        return None;
+    }
+    for base in [
+        COPY_BASE as usize,
+        PREPARED_CORE14_COPY_BASE as usize,
+        PREPARED_CORE23_COPY_BASE as usize,
+    ] {
+        let slice = &image[base..base + BANK_BYTES];
+        if matches_known_bank(slice) {
+            return Some((base, slice));
+        }
+    }
+    None
 }
 
 /// Structural W95 Max (model `0x0578`) check on the 96-byte `0xFEC0..0xFF20` block.

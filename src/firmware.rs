@@ -1,4 +1,4 @@
-//! Local record codecs from analysis checkpoints 5 and 15.
+//! W95 Max `.hexEncode` record cipher and 64-byte Feature Report buffer codecs.
 //! Decoding supplies the receiver's programming arguments; erase bounds are separate.
 
 use serde::Serialize;
@@ -53,8 +53,8 @@ impl EncodedRecord {
     /// Inverse of the receiver transform; no device access or address policy.
     pub(crate) fn encode(address: u32, plain: &[u8; 32]) -> Self {
         let mut bytes = [0; RECORD_LEN];
-        for (index, chunk) in plain.chunks_exact(4).enumerate() {
-            let word = u32::from_le_bytes(chunk.try_into().expect("DWORD"));
+        for (index, &chunk) in plain.as_chunks::<4>().0.iter().enumerate() {
+            let word = u32::from_le_bytes(chunk);
             let mask = if index == 7 { 0x8913_9813 } else { 0 };
             let cipher = (word ^ 0x2218_4952).wrapping_sub(0xa4a4_55aa) ^ mask;
             bytes[4 + index * 4..8 + index * 4].copy_from_slice(&cipher.to_le_bytes());
@@ -88,11 +88,11 @@ impl EncodedRecord {
         EncodedAddress(payload0.wrapping_sub(header).wrapping_add(0xA4A4_55AA))
     }
 
-    /// Receiver transform corroborated by checkpoint 17 and the installed boot bank.
+    /// Decode the 32-byte payload of a single `.hexEncode` record.
     pub fn decoded_payload(&self) -> [u8; 32] {
         let mut plain = [0; 32];
-        for (index, bytes) in self.0[4..].chunks_exact(4).enumerate() {
-            let cipher = u32::from_le_bytes(bytes.try_into().expect("fixed DWORD"));
+        for (index, &bytes) in self.0[4..].as_chunks::<4>().0.iter().enumerate() {
+            let cipher = u32::from_le_bytes(bytes);
             let mask = if index == 7 { 0x8913_9813 } else { 0 };
             let word = (cipher ^ mask).wrapping_add(0xA4A4_55AA) ^ 0x2218_4952;
             plain[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
@@ -100,8 +100,7 @@ impl EncodedRecord {
         plain
     }
 
-    /// Reproduce the vendor helper's 64-byte local buffer. R6 measured this
-    /// Feature length on the current boot transport; this codec opens no handle.
+    /// Build the 64-byte Feature Report buffer used to program this 32-byte flash record.
     pub fn local_buffer(&self) -> [u8; LOCAL_BUFFER_LEN] {
         let mut buffer = [0; LOCAL_BUFFER_LEN];
         buffer[..HEADER_LEN].copy_from_slice(&HEADER);
@@ -109,8 +108,7 @@ impl EncodedRecord {
         buffer
     }
 
-    /// Decode only an exact checkpoint-15 local buffer, without adding/removing
-    /// report-ID bytes or treating a device acknowledgment as a record.
+    /// Decode a 64-byte bootloader record Feature Report buffer back into an `EncodedRecord`.
     pub fn from_local_buffer(buffer: &[u8]) -> Result<Self, Error> {
         if buffer.len() != LOCAL_BUFFER_LEN {
             return Err(Error::Length {
@@ -146,7 +144,9 @@ impl W95MaxRecords {
         });
         let mut records = Vec::with_capacity(RECORD_COUNT);
         for (index, (bytes, expected)) in bytes
-            .chunks_exact(RECORD_LEN)
+            .as_chunks::<RECORD_LEN>()
+            .0
+            .iter()
             .zip(expected_addresses)
             .enumerate()
         {

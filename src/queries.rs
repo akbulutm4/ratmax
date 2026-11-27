@@ -1,4 +1,4 @@
-//! R3a host-audited normal-query policy and pure request/reply codecs.
+//! Normal-mode identity (`0x1F`) and status (`0x2D`) Feature Report codecs.
 //! These functions perform no I/O. The policy does not prove device-side
 //! non-mutation. The separately gated query worker lives in query_session.
 

@@ -15,6 +15,7 @@ pub const RECORDS: usize = 2042;
 pub struct Plan {
     pub(crate) original: Vec<u8>,
     pub(crate) sha256: String,
+    pub(crate) bank_base: usize,
     pub(crate) records: Vec<EncodedRecord>,
 }
 
@@ -63,12 +64,11 @@ impl Plan {
         if original.len() != 65536 {
             return Err("restore backup must be exactly 65,536 bytes".into());
         }
-        let bank = &original
-            [boot_bank::COPY_BASE as usize..boot_bank::COPY_BASE as usize + boot_bank::BANK_BYTES];
-        if !boot_bank::matches_known_bank(bank)
-            || !boot_bank::valid_w95max_identity(&original[0xfec0..0xff20])
-        {
-            return Err("original backup bank or W95 Max identity is invalid".into());
+        let Some((bank_base, _)) = boot_bank::embedded_bank(&original) else {
+            return Err("original backup has no recognized W95 Max boot bank".into());
+        };
+        if !boot_bank::valid_w95max_identity(&original[0xfec0..0xff20]) {
+            return Err("original backup W95 Max identity is invalid".into());
         }
         let sha256 = firmware::sha256(&original);
         // Restore the complete application, including gaps, and both saved-state
@@ -87,6 +87,7 @@ impl Plan {
         Ok(Self {
             original,
             sha256,
+            bank_base,
             records,
         })
     }
@@ -96,8 +97,23 @@ impl Plan {
     }
 
     pub fn embedded_boot_bank(&self) -> &[u8] {
-        &self.original
-            [boot_bank::COPY_BASE as usize..boot_bank::COPY_BASE as usize + boot_bank::BANK_BYTES]
+        &self.original[self.bank_base..self.bank_base + boot_bank::BANK_BYTES]
+    }
+
+    pub fn mode(&self) -> crate::boot_roundtrip::Mode {
+        let version = u16::from_le_bytes(self.original[0xfec4..0xfec6].try_into().expect("2"));
+        if version == 0x34 {
+            let packed = u16::from_le_bytes(self.original[0xfec6..0xfec8].try_into().expect("2"));
+            let core = match packed & 3 {
+                0 => crate::model::Core::Four,
+                1 => crate::model::Core::One,
+                2 => crate::model::Core::Two,
+                _ => crate::model::Core::Three,
+            };
+            crate::boot_roundtrip::Mode::Target(core)
+        } else {
+            crate::boot_roundtrip::Mode::Normal
+        }
     }
 
     pub fn encoded_records(&self) -> Vec<u8> {
@@ -126,7 +142,7 @@ impl Plan {
                 .expect("4"),
         );
         serde_json::json!({"mode":"original_backup_restore_plan", "backup_sha256":self.sha256,
-            "physical_execution_available":crate::boot_roundtrip::restore_available(),
+            "physical_execution_available":crate::workflow::available(),
             "records":self.records.len(),"record_stream_sha256":firmware::sha256(&stream),
             "programmed_ranges":[[0,65280],[65344,65408]],"programmed_bytes":65344,"protected_bytes":192,
             "first_record_address":0,"last_record_address":65248,"last_record_index":2041,

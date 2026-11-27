@@ -1,11 +1,13 @@
 # Using Ratmax on the Bloody W95 Max
 
-Install via Cargo (or build locally with `cargo build --release --locked`) and launch `ratmax tui` directly (workspace resolves automatically from `RATMAX_WORKSPACE`, `$XDG_CONFIG_HOME/ratmax/workspace.json`, or `~/.config/ratmax/workspace.json`, including `$SUDO_USER` under `sudo`):
+Install via Cargo (or build locally with `cargo build --release --locked`) and launch `ratmax tui` directly (workspace resolves automatically from `RATMAX_WORKSPACE`, `$XDG_CONFIG_HOME/ratmax/workspace.json`, or `~/.config/ratmax/workspace.json`; use `sudo -E` if running under `sudo`):
 
 ```sh
 cargo install --path . --locked
 ratmax tui
 ```
+
+On first launch without a baseline/backup, the TUI detects your connected W95 Max and prompts you to initialize your verified backup, baseline, and `workspace.json` directly from the mouse (read-only 2-pass capture, zero writes). You can also run `ratmax init` from the CLI.
 
 ### Non-root Linux access (udev rules)
 
@@ -20,6 +22,8 @@ EOF
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
+*(Or run `sudo -E ratmax tui` if you prefer `sudo` without `udev` rules.)*
+
 ### Extracting Stock Firmware Assets (`7z`)
 
 Extract only the four W95 Max `.hexEncode` images from the official Bloody WorkShop 8 installer using `7z` (also printed by `ratmax --help`), then verify with `ratmax inspect`:
@@ -31,7 +35,7 @@ Extract only the four W95 Max `.hexEncode` images from the official Bloody WorkS
 ratmax inspect --assets "$HOME/.local/share/ratmax/vendor/program files/BloodyWorkShop8"
 ```
 
-Point `"assets"` in `~/.config/ratmax/workspace.json` to that `BloodyWorkShop8` directory.
+Ratmax finds `~/.local/share/ratmax/vendor/program files/BloodyWorkShop8` automatically during TUI initialization or `ratmax init` (or pass `--assets PATH`).
 
 ## Core Support & Feature Gating
 

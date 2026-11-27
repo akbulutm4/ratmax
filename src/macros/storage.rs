@@ -466,8 +466,10 @@ fn build_entries(image: &mut [u8], entries: &[Stored]) {
 
 fn checksum(image: &mut [u8]) {
     let words: Vec<_> = image[BASE..EXT_END]
-        .chunks_exact(2)
-        .map(|b| u16::from_le_bytes(b.try_into().unwrap()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&b| u16::from_le_bytes(b))
         .collect();
     let c = crate::profile::checksums(&words, &[], &[]);
     put(image, BASE + 4, c.sum);

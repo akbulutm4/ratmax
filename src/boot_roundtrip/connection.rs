@@ -51,6 +51,9 @@ pub(super) fn validate_connection(
     }
 }
 
+pub(crate) const ORIGINAL_DESCRIPTOR_SHA256: &str =
+    "067e4c8b36aec2c63195c2d68ed9fe3e9eca5b32ebdc3f1ab915c3acdc730856";
+
 pub(crate) fn target_descriptor(core: crate::model::Core) -> &'static str {
     match core.firmware_index().get() {
         0 => "8af1935dc5c5ece3ba36ffa495244f8c1dcce5695bd3c61c8cd7e867a76be3c4",
@@ -58,6 +61,53 @@ pub(crate) fn target_descriptor(core: crate::model::Core) -> &'static str {
         2 => "2d4e61b554de9095489ab600ffc81e35f2cc3b62653039afa2c1cd8c2ab3589e",
         _ => "a4fc70e1648716690a8989efb837f907447bc0ced5e68e906a53615fb7890d24",
     }
+}
+
+/// Classify any connected W95 Max normal control interface from passive sysfs
+/// metadata without requiring an existing baseline.
+pub fn detect_connected_mouse(
+    report: &DiscoveryReport,
+) -> Result<Option<(Mode, Binding)>, String> {
+    if !report.complete() || report.sysfs_root != "/sys" {
+        return Err("mouse detection requires a complete real cached sysfs snapshot".into());
+    }
+    let candidates: Vec<_> = report
+        .matching_interfaces
+        .iter()
+        .filter(|iface| {
+            iface.vendor_id == 0x09da
+                && iface.product_id == 0x712f
+                && iface.candidate_for_later_query
+        })
+        .collect();
+    if candidates.len() > 1 {
+        return Err("multiple W95 Max mice detected; connect only one to initialize".into());
+    }
+    let Some(interface) = candidates.first() else {
+        return Ok(None);
+    };
+    let binding = Binding::from_control_interface(interface)?;
+    binding.validate()?;
+    if binding.usb_interface_number != 2 {
+        return Err("unexpected W95 Max control interface number".into());
+    }
+    if binding.usb_release_bcd == 0x28
+        && binding.descriptor_bytes == 165
+        && binding.descriptor_sha256 == ORIGINAL_DESCRIPTOR_SHA256
+    {
+        return Ok(Some((Mode::Normal, binding)));
+    }
+    if binding.usb_release_bcd == 0x34 && binding.descriptor_bytes == 180 {
+        for core in crate::model::Core::ALL {
+            if binding.descriptor_sha256 == target_descriptor(core) {
+                return Ok(Some((Mode::Target(core), binding)));
+            }
+        }
+    }
+    Err(format!(
+        "detected 09DA:712F interface {} has unsupported firmware/descriptor (bcd={:#06x}, {}B, sha256={})",
+        binding.node, binding.usb_release_bcd, binding.descriptor_bytes, binding.descriptor_sha256
+    ))
 }
 
 pub(super) fn validate(mode: Mode, current: &Binding, original: &Binding) -> Result<(), String> {
@@ -82,7 +132,8 @@ pub(super) fn validate(mode: Mode, current: &Binding, original: &Binding) -> Res
             // new exact binding and revalidated on every subsequent operation.
         }
         Mode::Normal => {
-            if current.vendor_id != original.vendor_id
+            if original.usb_release_bcd != 0x28
+                || current.vendor_id != original.vendor_id
                 || current.product_id != original.product_id
                 || current.usb_interface_number != original.usb_interface_number
                 || current.usb_release_bcd != original.usb_release_bcd

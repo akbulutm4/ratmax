@@ -1,5 +1,4 @@
-//! Bounded R3 closure experiment: 256 sensitivity candidates, no arbitrary
-//! address/count interface, no state change, writer, or restoration API.
+//! Sensitivity block (`0xE000..0xE100`) checksums and layout helpers.
 use crate::{
     firmware,
     readback::{ByteSpan, RuntimeDescriptorReply},

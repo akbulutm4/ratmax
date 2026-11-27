@@ -13,6 +13,7 @@ use std::path::Path;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[allow(dead_code)]
 pub enum Scenario {
     Nominal,
     EntryNeighborDamage,
@@ -28,31 +29,6 @@ pub enum Scenario {
     EntryNotApplied,
     ResetAckLost,
     ResetNotApplied,
-}
-
-impl Scenario {
-    pub const ALL: [Self; 14] = [
-        Self::Nominal,
-        Self::EntryNeighborDamage,
-        Self::BootWrongModel,
-        Self::BootReadEcho,
-        Self::RestoreNotApplied,
-        Self::ReturnMissing,
-        Self::SettingsChanged,
-        Self::UncertainEntry,
-        Self::UncertainRestore,
-        Self::WrongPort,
-        Self::BadDescriptor,
-        Self::EntryNotApplied,
-        Self::ResetAckLost,
-        Self::ResetNotApplied,
-    ];
-    pub fn parse(name: &str) -> Result<Self, String> {
-        Self::ALL
-            .into_iter()
-            .find(|scenario| serde_json::to_value(scenario).expect("enum") == name)
-            .ok_or_else(|| "unknown boot-roundtrip scenario".into())
-    }
 }
 
 #[derive(Serialize)]
@@ -151,20 +127,6 @@ impl Model {
         Ok(model)
     }
 
-    pub fn for_target_proof(reference: &Reference, proof: &super::target_return::Proof) -> Self {
-        let mut model = Self::new(reference, Scenario::Nominal);
-        model.memory = proof.image[..65536].to_vec();
-        let prep_bank = proof.image[boot_bank::COPY_BASE as usize
-            ..boot_bank::COPY_BASE as usize + boot_bank::BANK_BYTES]
-            .to_vec();
-        model.active_bank = prep_bank.clone();
-        model.target = Some(proof.core);
-        model.target_bank = prep_bank;
-        model.mode = Mode::Target(proof.core);
-        model.generation = 2;
-        model
-    }
-
     pub fn for_restore(reference: &Reference, plan: &crate::backup_restore::Plan) -> Self {
         let mut model = Self::new(reference, Scenario::Nominal);
         model.memory.clone_from(&plan.original);
@@ -175,20 +137,6 @@ impl Model {
         model.memory[0xfefc..0xff00].fill(0);
         model.mode = Mode::Boot;
         model.generation = 1;
-        model
-    }
-
-    pub fn for_restore_entry(
-        reference: &Reference,
-        plan: &crate::backup_restore::Plan,
-        normal: bool,
-    ) -> Self {
-        let mut model = Self::for_restore(reference, plan);
-        if normal {
-            model.memory.clone_from(&plan.original);
-            model.mode = Mode::Normal;
-            model.generation = 0;
-        }
         model
     }
 
@@ -522,150 +470,6 @@ impl Model {
     }
 }
 
-pub(super) fn run_firmware(
-    reference: &Reference,
-    plan: &crate::prepared::Plan,
-    output: &Path,
-) -> Result<serde_json::Value, String> {
-    let (state, model) = Session::new_firmware(
-        reference,
-        plan,
-        Model::for_firmware(reference, plan),
-        Some(output),
-    )
-    .execute();
-    Ok(
-        serde_json::json!({"mode":"offline_supervised_firmware_simulation","result":state,"physical_execution_available":false,
-        "whole_configuration_pipeline_complete":false,"actions":model.records.len(),
-        "assumptions":["requested-byte programming model", "successful complete target boot-bank copy", "startup configuration effects are observed, not semantically verified"]}),
-    )
-}
-
-pub(super) fn run_readback(
-    reference: &Reference,
-    plan: &crate::backup_restore::Plan,
-    output: &Path,
-) -> Result<serde_json::Value, String> {
-    let capture_dir = output.join("capture");
-    std::fs::create_dir(&capture_dir).map_err(|e| e.to_string())?;
-    let (capture, model) = Session::new_readback(
-        reference,
-        plan,
-        Model::for_restore_entry(reference, plan, true),
-        Some(&capture_dir),
-    )
-    .execute();
-    if !capture
-        .restore
-        .as_ref()
-        .is_some_and(|r| r.boot_readback_verified)
-        || model
-            .records
-            .iter()
-            .any(|r| matches!(&r.action,Action::Feature{frame,..} if frame[1]==1))
-    {
-        return Err(format!("readback simulation failed: {capture:?}"));
-    }
-    let proof = super::entry_return::Proof {
-        page: plan.original[0xfec0..0xff00].to_vec(),
-        uv: plan.original[0xffd0..0xffd8].to_vec(),
-        protected_block: plan.original[0xffc0..0xffe0].to_vec(),
-        fingerprint: "offline-model-no-physical-authority".into(),
-    };
-    let return_dir = output.join("entry-return");
-    std::fs::create_dir(&return_dir).map_err(|e| e.to_string())?;
-    let (returned, model) =
-        Session::new_entry_return(reference, &proof, Mode::Boot, model, Some(&return_dir))
-            .execute();
-    if model
-        .records
-        .iter()
-        .any(|r| matches!(&r.action,Action::Feature{frame,..} if frame[1]==1))
-    {
-        return Err("readback model issued a firmware record".into());
-    }
-    let report = serde_json::json!({"mode":"offline_boot_readback_with_return","complete":returned.complete,"capture":capture,"entry_return":returned,"firmware_records":0,"physical_execution_available":false});
-    super::executor::save_json(&output.join("boot-readback.json"), &report)?;
-    Ok(report)
-}
-
-pub(super) fn run_restore(
-    reference: &Reference,
-    plan: &crate::backup_restore::Plan,
-    output: &Path,
-    failures: u32,
-    attempts: Option<u32>,
-    from_normal: bool,
-) -> Result<serde_json::Value, String> {
-    let model = Model::for_restore_entry(reference, plan, from_normal);
-    let mut held = Some(model);
-    let mut report = super::executor::retry_restore(
-        output,
-        plan.sha256(),
-        attempts,
-        from_normal,
-        |number, directory| {
-            std::fs::create_dir(directory).map_err(|e| e.to_string())?;
-            let mut model = held.take().ok_or("missing stopped restore model")?;
-            model.records.clear();
-            model.generation += 1; // A new handle and binding for each whole attempt.
-            model.firmware_fault = (number <= failures).then_some("record-get-failed");
-            let (state, model) = Session::new_restore_entry(
-                reference,
-                plan,
-                model,
-                Some(directory),
-                from_normal && number == 1,
-            )
-            .execute();
-            let frames: Vec<u8> = model
-                .records
-                .iter()
-                .filter_map(|r| match &r.action {
-                    Action::Feature {
-                        kind: CallKind::Set,
-                        frame,
-                        ..
-                    } if frame[1] == 1 => Some(frame.clone()),
-                    _ => None,
-                })
-                .flatten()
-                .collect();
-            let first = frames.chunks_exact(64).next().map(|frame| {
-                crate::firmware::EncodedRecord::from_local_buffer(frame)
-                    .unwrap()
-                    .address()
-                    .get()
-            });
-            let report = serde_json::json!({"mode":"offline_backup_restore_attempt","result":state,
-            "worker_reaped":true,"worker_state_agreed":true,"physical_execution_available":false,
-            "first_record_address":first,"record_stream_sha256":sha256(&frames),"actions":model.records.len(),
-            "assumptions":["requested-byte programming only", "complete startup bank restoration modeled; no torn-page or CPU emulation"]});
-            super::executor::save_json(&directory.join("session.json"), &report)?;
-            held = Some(model);
-            Ok(report)
-        },
-    )?;
-    report["physical_execution_available"] = false.into();
-    report["mode"] = "offline_backup_restore_retries".into();
-    Ok(report)
-}
-
-pub(super) fn run_backup(
-    reference: &Reference,
-    output: &Path,
-) -> Result<serde_json::Value, String> {
-    let (state, model) = Session::new_backup(
-        reference,
-        Model::new(reference, Scenario::Nominal),
-        Some(output),
-    )
-    .execute();
-    Ok(
-        serde_json::json!({"mode":"offline_normal_firmware_backup_simulation","result":state,"physical_execution_available":false,"actions":model.records.len()}),
-    )
-}
-
 impl Link for Model {
     fn perform(&mut self, action: &Action) -> Result<Answer, Fault> {
         let result = self.perform_inner(action);
@@ -675,21 +479,6 @@ impl Link for Model {
         });
         result
     }
-}
-
-pub(super) fn run(
-    reference: &Reference,
-    output: &Path,
-    scenario: Scenario,
-) -> Result<serde_json::Value, String> {
-    let (state, model) =
-        Session::new(reference, Model::new(reference, scenario), Some(output)).execute();
-    super::executor::save_json(&output.join("simulation-trace.json"), &model.records)?;
-    Ok(
-        serde_json::json!({"mode":"offline_boot_roundtrip_simulation", "scenario":scenario,
-        "result":state, "simulated_final_mode":model.mode,
-        "simulated_final_marker":model.memory[0xfefc..0xff00], "device_calls":0}),
-    )
 }
 
 pub(super) fn run_workflow_model(

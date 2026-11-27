@@ -1,6 +1,4 @@
-//! Fixed temporary RAM-access lifecycle. Pure state and codecs; no I/O.
-//! The installed 0028 header exchange is recorded in CHECKPOINT-R3-ACCESS-PHYSICAL.md.
-//! Physical dispatch is separately disabled in access_session.
+//! Temporary RAM-access baseline and Feature Report frame builders. Pure codecs; no I/O.
 use crate::{
     firmware::sha256,
     model::Core,
@@ -22,15 +20,6 @@ pub const SETTINGS_ADDRESSES: [u32; 10] = [
 pub const SETTINGS_SEEDS: [u8; 2] = [0xA5, 0x5A];
 pub const SETTINGS_BYTES: usize = SETTINGS_ADDRESSES.len() * BLOCK_BYTES;
 const METADATA_ADDRESS: u32 = 0xFEC0;
-const SETTINGS_BASELINE: &str = "7df9e94043deea8ee8fa7e40fd4e6890b00d987c322fb821a9339d066214cb76";
-// The first four windows anchor the settings block. The saved-state page can
-// change during normal use, so its bytes must agree between fresh passes.
-const SETTINGS_ANCHORS: [&str; 4] = [
-    "8ad6601eeb8c688c8ea69bfacce0f0634deb03cca93d1c4fb07430fa79155241",
-    "ae386283723d2804d1cfa14d3db86b4d5d9b331146d7239cc29a2d38d0336a18",
-    "cfdd0c63ced3467651be3bb86f7531872dbe2efd7bd9f8416114fec48879ebe7",
-    "9a00f08dbee51404714fcbbe7b01c1034cb6998fcc86e103b0f796a24dc62935",
-];
 pub const OPEN_BUDGET_MS: u64 = 120_000;
 const MAGIC: u32 = 0x2218_4952;
 
@@ -45,6 +34,7 @@ pub struct AccessBaseline {
     pub(crate) source_sha256: Vec<String>,
 }
 impl AccessBaseline {
+    #[cfg(any(test, all(target_os = "linux", feature = "linux-query")))]
     pub(crate) fn new(
         binding: Binding,
         raw: [Vec<u8>; 4],
@@ -72,7 +62,7 @@ impl AccessBaseline {
         {
             return Err("access baseline requires four saved-source hashes".into());
         }
-        match OfflineQueryFrame::new(NormalQuery::Identity, 64)
+        let (version, core) = match OfflineQueryFrame::new(NormalQuery::Identity, 64)
             .map_err(|e| e.to_string())?
             .decode(&self.identity)
             .map_err(|e| e.to_string())?
@@ -81,19 +71,29 @@ impl AccessBaseline {
                 core: Core::One,
                 version_compare_word: 0x28,
                 ..
-            } => (),
-            _ => return Err("access job restricted to W95 Max/Core 1/version 0028".into()),
-        }
+            } => (0x28_u16, Core::One),
+            NormalReply::Identity {
+                core,
+                version_compare_word: 0x34,
+                ..
+            } => (0x34_u16, core),
+            _ => {
+                return Err(
+                    "access baseline restricted to W95 Max (0028 Core 1 or 0034 Core 1–4)".into(),
+                );
+            }
+        };
+        let _ = core;
         match OfflineQueryFrame::new(NormalQuery::Status, 64)
             .map_err(|e| e.to_string())?
             .decode(&self.status)
             .map_err(|e| e.to_string())?
         {
             NormalReply::Status {
-                display_version_word: 0x28,
+                display_version_word,
                 ..
-            } => (),
-            _ => return Err("access status version must be 0028".into()),
+            } if display_version_word == version => (),
+            _ => return Err("access status version differs from identity version".into()),
         }
         let d = RuntimeDescriptorReply::decode(&self.layout).map_err(|e| e.to_string())?;
         let bases = d.descriptor().bases();
@@ -104,8 +104,10 @@ impl AccessBaseline {
             return Err("access job requires the saved E000/E200/FE9C layout".into());
         }
         conservative_echo(&read_frame(0x2F, 0xE000, 2), &self.header).map_err(|e| e.to_string())?;
-        if self.header[32..36] != [0xA4; 4] {
-            return Err("access baseline requires saved A4 header".into());
+        let valid_header = self.header[32..36] == [0xA4; 4]
+            || (version == 0x34 && self.header[32..36] == [0xFF; 4]);
+        if !valid_header {
+            return Err("access baseline requires saved A4 (or stock 0034 FF) header".into());
         }
         Ok(())
     }
@@ -278,11 +280,6 @@ impl AccessJob {
     }
     pub fn with_scope(baseline: AccessBaseline, scope: CaptureScope) -> Result<Self, String> {
         baseline.validate()?;
-        if scope != CaptureScope::Firmware && baseline.fingerprint() != SETTINGS_BASELINE {
-            return Err(
-                "settings-page readback requires the reviewed installed 0028 baseline".into(),
-            );
-        }
         Ok(Self {
             baseline,
             scope,
@@ -731,14 +728,6 @@ impl AccessJob {
         }
         if data == &expected[32..] {
             return Err("seeded settings reply retained all seed bytes".into());
-        }
-        if let Some(anchor) = SETTINGS_ANCHORS.get(block)
-            && sha256(data) != *anchor
-        {
-            return Err(format!(
-                "saved settings data changed at {:04X}",
-                SETTINGS_ADDRESSES[block]
-            ));
         }
         if pass == 1 && self.images[0][offset..offset + BLOCK_BYTES] != *data {
             return Err(format!(

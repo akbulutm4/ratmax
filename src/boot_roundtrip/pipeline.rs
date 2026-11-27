@@ -7,7 +7,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const PHYSICAL_PRESET_CYCLE_RELEASED: bool = false;
 pub const MAX_CALLS: u32 = 20_000;
 pub const TOTAL_SECONDS: u64 = 1800;
 pub const PROFILE_BYTES: usize = 0x500;
@@ -151,16 +150,15 @@ impl Plan {
         "original_backup_sha256":self.backup.sha256(),"target_expected_sha256":sha256(&self.target),"configured_expected_sha256":sha256(&self.configured),
         "forward_records":self.stock.image_records().len(),"return_records":self.backup.records.len(),"sample_addresses":self.samples,"sample_bytes":self.samples.len()*32,
         "full_device_read_budget_for_entire_test":1,"full_read_reserved_for_original_restore_prefix":true,"forward_verification":"record acknowledgments plus critical-code/configuration/unit samples and complete active loader; not whole-image verification",
-        "configuration_program_pages":[[0xe000,0xe100],[0xe200,0xe700]],"configuration_programs":if self.request.shooting_comparison {132} else {50},"runtime_slot_applications":if self.request.shooting_comparison {vec![0,1,0]} else {vec![]},"configuration_policy":"reapply original sensitivity block; copy self-contained stock ROM main profile; preserve primary buttons; Core 3 side Back precision-hold and side Forward double-click selector",
-        "profile_source_bytes":PROFILE_SOURCE_BYTES,"main_checksum_scope":"copied main vector; additional marker must remain invalid/unallocated; no NOR vector allocated","profile_materialization_physically_qualified":false,
-        "shooting_comparison":self.request.shooting_comparison,"observations":self.observation_phases(),"observation_seconds":self.request.observation_seconds,"max_feature_calls_per_worker":MAX_CALLS,"total_seconds_per_worker":TOTAL_SECONDS,"resume_supported":false,"physical_execution_available":available(),
-        "remaining_physical_questions":["stock-program reference and shooting-selector activation", "precision and click behavior", "sampled preset verification under the read budget"]});
+        "configuration_program_pages":[[0xe000,0xe100],[0xe200,0xe700]],"configuration_programs":if self.request.shooting_comparison {132} else {50},"runtime_slot_applications":if self.request.shooting_comparison {vec![0,1,0]} else {vec![]},"configuration_policy":"reapply original sensitivity block; copy self-contained stock ROM main profile; preserve primary buttons",
+        "profile_source_bytes":PROFILE_SOURCE_BYTES,"main_checksum_scope":"copied main vector; additional marker must remain invalid/unallocated; no NOR vector allocated",
+        "shooting_comparison":self.request.shooting_comparison,"observations":self.observation_phases(),"observation_seconds":self.request.observation_seconds,"max_feature_calls_per_worker":MAX_CALLS,"total_seconds_per_worker":TOTAL_SECONDS,"resume_supported":false,"physical_execution_available":crate::workflow::available()});
         if let Some(settings) = &self.request.workflow {
             summary["mode"] = "w95max_workflow_plan".into();
             summary["workflow"] = serde_json::to_value(settings).expect("settings");
             summary["configured_expected_sha256"] = serde_json::Value::Null;
             summary["exact_candidate_available_after_bounded_preflight"] = true.into();
-            summary["configuration_policy"]="preserve fresh owned settings and profile bytes, apply only the selected CPI/rate and side assignments".into();
+            summary["configuration_policy"]="preserve fresh owned settings and profile bytes, apply only the selected CPI/rate and button assignments".into();
             summary["physical_execution_available"] = crate::workflow::available().into();
             summary["forward_records"] =
                 serde_json::json!(if settings.operation == crate::workflow::Operation::Flash {
@@ -194,10 +192,6 @@ impl Plan {
             });
             summary["backup_restore_records_on_request_or_failure"] =
                 serde_json::json!(self.backup.records.len());
-            summary["remaining_physical_questions"] = serde_json::json!([
-                "new TUI leave-installed/configure/restore acceptance",
-                "Core 2/4 input behavior remains unqualified"
-            ]);
             summary["observations"] = serde_json::json!([]);
             summary["full_reads_on_success"] =
                 serde_json::json!(if settings.restore_after { 1 } else { 0 });
@@ -267,8 +261,10 @@ impl Plan {
         }
         goal[0xe2c0..0xe2c2].copy_from_slice(&reference.to_le_bytes());
         let words: Vec<_> = goal[0xe200..0xe200 + PROFILE_SOURCE_BYTES]
-            .chunks_exact(2)
-            .map(|b| u16::from_le_bytes(b.try_into().unwrap()))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&b| u16::from_le_bytes(b))
             .collect();
         let c = crate::profile::checksums(&words, &[], &[]);
         goal[0xe204..0xe206].copy_from_slice(&c.sum.to_le_bytes());
@@ -322,8 +318,10 @@ fn configure(
         configured[at..at + 2].copy_from_slice(&value.to_le_bytes());
     }
     for word in blob[8..]
-        .chunks_exact(2)
-        .map(|v| u16::from_le_bytes(v.try_into().unwrap()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&v| u16::from_le_bytes(v))
     {
         if word & 0xf000 == 0xb000 {
             return Err("stock profile requires an external NOR program".into());
@@ -342,8 +340,10 @@ fn configure(
         configured[at..at + 2].copy_from_slice(&word.to_le_bytes());
     }
     let words: Vec<u16> = configured[0xe200..0xe200 + PROFILE_SOURCE_BYTES]
-        .chunks_exact(2)
-        .map(|b| u16::from_le_bytes(b.try_into().unwrap()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&b| u16::from_le_bytes(b))
         .collect();
     let c = crate::profile::checksums(&words, &[], &[]);
     configured[0xe204..0xe206].copy_from_slice(&c.sum.to_le_bytes());
@@ -351,12 +351,9 @@ fn configure(
     Ok(configured)
 }
 
-pub fn available() -> bool {
-    PHYSICAL_PRESET_CYCLE_RELEASED && super::boot_control_available()
-}
 pub fn prepare(project: &Path, output: &Path, simulate: bool) -> Result<serde_json::Value, String> {
     let plan = Plan::load(project)?;
-    let output = crate::access_session::create_output(output)?;
+    let output = crate::boot_roundtrip::create_output(output)?;
     super::executor::save_json(&output.join("plan.json"), &plan.summary())?;
     if simulate {
         super::simulation::run_pipeline(&plan, &output)
@@ -364,21 +361,9 @@ pub fn prepare(project: &Path, output: &Path, simulate: bool) -> Result<serde_js
         Ok(plan.summary())
     }
 }
-pub fn run(project: &Path, output: &Path) -> Result<serde_json::Value, String> {
-    if !available() {
-        return Err("physical preset cycle is disabled in this build".into());
-    }
-    super::executor::pipeline::run(project, output, false)
-}
-pub fn restore(session: &Path, output: &Path) -> Result<serde_json::Value, String> {
-    if !available() {
-        return Err("physical preset restoration is disabled in this build".into());
-    }
-    super::executor::pipeline::run(session, output, true)
-}
 pub fn worker(source: &Path) -> Result<(), String> {
-    if !available() && !crate::workflow::available() {
-        return Err("physical preset worker is disabled in this build".into());
+    if !crate::workflow::available() {
+        return Err("workflow worker is disabled in this build".into());
     }
     super::executor::pipeline::worker(source)
 }

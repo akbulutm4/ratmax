@@ -65,7 +65,7 @@ impl fmt::Display for Error {
             ),
             Self::BufferHeader => write!(
                 f,
-                "invalid local record-buffer header; expected report ID 07 and the checkpoint 15 layout"
+                "invalid local record-buffer header; expected Report ID 07 bootloader record framing"
             ),
         }
     }

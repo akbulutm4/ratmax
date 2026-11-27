@@ -118,8 +118,8 @@ impl<'a, T: Link> Session<'a, T> {
         }
         let (source, canonical) = plan.images(mode).map_err(Fault::known)?;
         let (mut current, owned) = self.workflow_capture(&source, &canonical, mode)?;
-        let bank = &source[boot_bank::COPY_BASE as usize
-            ..boot_bank::COPY_BASE as usize + boot_bank::BANK_BYTES];
+        let (_, bank) = boot_bank::embedded_bank(&source)
+            .ok_or_else(|| Fault::known("source image has no recognized embedded boot bank"))?;
         self.pipeline_bank("workflow-before-bank", Some(bank))?;
         if settings.operation == Operation::Inspect {
             let shooting_slot = if workflow::shooting_supported(mode) {

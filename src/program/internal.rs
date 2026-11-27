@@ -208,8 +208,10 @@ pub(crate) fn apply(
         put(image, SLOT, reference);
     }
     let words: Vec<_> = image[BASE..sum_end]
-        .chunks_exact(2)
-        .map(|b| u16::from_le_bytes(b.try_into().unwrap()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&b| u16::from_le_bytes(b))
         .collect();
     let sums = crate::profile::checksums(&words, &[], &[]);
     put(image, BASE + 4, sums.sum);

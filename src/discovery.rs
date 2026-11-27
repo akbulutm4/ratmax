@@ -1,4 +1,4 @@
-//! P1 passive discovery. Reads bounded, whitelisted cached sysfs files only.
+//! Passive sysfs discovery. Reads bounded, whitelisted cached sysfs files only.
 //! No hidraw node is opened and no device report/driver operation is exposed.
 
 use serde::{Deserialize, Serialize};
@@ -499,7 +499,7 @@ fn assess(snapshot: &mut InterfaceSnapshot) {
     if manufacturer.trim_end() == "a4 boot" || product.trim_end() == "boot device" {
         snapshot
             .candidate_blockers
-            .push("known boot string; P1 normal query selection excludes it".into());
+            .push("bootloader USB product string; normal-mode selection excludes it".into());
     }
     snapshot.vendor_string_hint = if manufacturer == "company " && product == "usb device  " {
         Some("vendor generic normal-string branch; model unknown".into())
@@ -593,7 +593,9 @@ impl DiscoveryReport {
                 let bytes = descriptor
                     .hex
                     .as_bytes()
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|pair| {
                         u8::from_str_radix(std::str::from_utf8(pair).expect("hex ASCII"), 16)
                             .expect("captured hex")
