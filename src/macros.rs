@@ -504,35 +504,62 @@ pub fn compile(program: &Sequence) -> Result<Compiled, String> {
     if program.press.is_empty() && program.release.is_empty() {
         return Err("add at least one macro step".into());
     }
-    let mut results = Vec::new();
-    let mut duration_ms = 0;
-    for (label, steps) in [("press", &program.press), ("release", &program.release)] {
-        let mut b = Builder::default();
-        for _ in 0..program.repeat {
-            for (i, step) in steps.iter().enumerate() {
-                b.step(step)
-                    .map_err(|e| format!("{label} step {}: {e}", i + 1))?;
-            }
-            if !b.held.is_empty() || b.mouse != 0 {
-                return Err(format!(
-                    "{label} leaves a key/button held; add its matching up step"
-                ));
-            }
-            if b.words.len() > 4095 {
-                return Err("compiled event exceeds 4096 words".into());
-            }
+    let mut press_builder = Builder::default();
+    for _ in 0..program.repeat {
+        for (i, step) in program.press.iter().enumerate() {
+            press_builder
+                .step(step)
+                .map_err(|e| format!("press step {}: {e}", i + 1))?;
         }
-        duration_ms += b.ms;
-        if !steps.is_empty() {
-            b.words.push(0x262f);
+        if program.repeat > 1 && (!press_builder.held.is_empty() || press_builder.mouse != 0) {
+            return Err(
+                "press leaves a key/button held; add its matching up step (or set repeat to 1 to release it in On Release)"
+                    .into(),
+            );
         }
-        results.push(b.words);
+        if press_builder.words.len() > 4095 {
+            return Err("compiled event exceeds 4096 words".into());
+        }
+    }
+    let mut duration_ms = press_builder.ms;
+    if !program.press.is_empty() {
+        press_builder.words.push(0x262f);
+    }
+
+    let mut release_builder = Builder {
+        words: Vec::new(),
+        held: press_builder.held,
+        mouse: press_builder.mouse,
+        ms: 0,
+    };
+    for _ in 0..program.repeat {
+        for (i, step) in program.release.iter().enumerate() {
+            release_builder
+                .step(step)
+                .map_err(|e| format!("release step {}: {e}", i + 1))?;
+        }
+        if program.repeat > 1 && (!release_builder.held.is_empty() || release_builder.mouse != 0) {
+            return Err("release leaves a key/button held; add its matching up step".into());
+        }
+        if release_builder.words.len() > 4095 {
+            return Err("compiled event exceeds 4096 words".into());
+        }
+    }
+    if !release_builder.held.is_empty() || release_builder.mouse != 0 {
+        return Err(
+            "macro leaves a key/button held after release; add its matching up step in On Press or On Release"
+                .into(),
+        );
+    }
+    duration_ms += release_builder.ms;
+    if !program.release.is_empty() {
+        release_builder.words.push(0x262f);
     }
     if duration_ms > 60_000 {
         return Err("total programmed delay exceeds 60 seconds".into());
     }
-    let release = results.pop().unwrap();
-    let press = results.pop().unwrap();
+    let press = press_builder.words;
+    let release = release_builder.words;
     let compact_tail_bytes = storage::compact_bytes(press.len(), release.len());
     let (internal_bytes, extended_pages, internal_installable) =
         storage::single_storage(press.len(), release.len());

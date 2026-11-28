@@ -68,6 +68,56 @@ fn shortcuts_repeats_delays_and_each_event_are_validated() {
     let mut p = program(&["tap a"]);
     p.repeat = 0;
     assert!(macros::compile(&p).is_err());
+
+    // Hold key/modifier/mouse on press and release on release (e.g. push-to-talk / key remap).
+    let hold_key = Sequence {
+        press: vec![Step::parse("down a").unwrap()],
+        release: vec![Step::parse("up a").unwrap()],
+        repeat: 1,
+    };
+    let ck = macros::compile(&hold_key).unwrap();
+    assert_eq!(ck.words.press, [0x2104, 0x262f]);
+    assert_eq!(ck.words.release.unwrap(), [0x2004, 0x262f]);
+    assert_eq!(ck.extended_pages, 0);
+    assert!(ck.internal_installable);
+
+    let hold_combo = Sequence {
+        press: vec![
+            Step::parse("down ctrl").unwrap(),
+            Step::parse("down c").unwrap(),
+        ],
+        release: vec![
+            Step::parse("up c").unwrap(),
+            Step::parse("up ctrl").unwrap(),
+        ],
+        repeat: 1,
+    };
+    let cc = macros::compile(&hold_combo).unwrap();
+    assert_eq!(cc.words.press, [0x2301, 0x2106, 0x262f]);
+    assert_eq!(cc.words.release.unwrap(), [0x2006, 0x2201, 0x262f]);
+
+    let hold_mouse = Sequence {
+        press: vec![Step::parse("mouse-down left").unwrap()],
+        release: vec![Step::parse("mouse-up left").unwrap()],
+        repeat: 1,
+    };
+    let cm = macros::compile(&hold_mouse).unwrap();
+    assert_eq!(cm.words.press, [0x2501, 0x262f]);
+    assert_eq!(cm.words.release.unwrap(), [0x2401, 0x262f]);
+
+    // Still rejects unmatched release, missing release, or repeat > 1 when holding across events.
+    let mismatched = Sequence {
+        press: vec![Step::parse("down a").unwrap()],
+        release: vec![Step::parse("up b").unwrap()],
+        repeat: 1,
+    };
+    assert!(macros::compile(&mismatched).is_err());
+    let repeated_hold = Sequence {
+        press: vec![Step::parse("down a").unwrap()],
+        release: vec![Step::parse("up a").unwrap()],
+        repeat: 2,
+    };
+    assert!(macros::compile(&repeated_hold).is_err());
 }
 #[test]
 fn files_keep_incomplete_drafts_and_preview_compiles_complete_projects() {

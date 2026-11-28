@@ -15,7 +15,7 @@ use ratmax::{
 };
 use serde::Serialize;
 
-const HELP: &str = "ratmax 0.2.1 — Bloody W95 Max configuration, lighting, macros, and firmware tooling
+const HELP: &str = "ratmax 0.3.0 — Bloody W95 Max configuration, lighting, macros, and firmware tooling
 
 Usage:
   ratmax tui     [--workflow-model] [--restore-session JOB]
